@@ -132,18 +132,11 @@ def generate_figure(series, name, color):
     trace_actual = go.Scatter(x=series.index, y=series.values, mode="lines+markers",
                               name=f"{name} Aktual", line=dict(color=color))
 
-    if name not in ["Suhu (°C)", "Kelembapan (%)"]:
-        trace_pred = go.Scatter(x=series.index, y=ewma, mode="lines+markers",
-                            name=f"{name} Prediksi", line=dict(color="magenta"))
-
     layout = go.Layout(title=name, xaxis={"title": "Waktu", "tickformat": "%H:%M"},
                        yaxis={"title": name}, hovermode="closest",
                        legend=dict(orientation="h"))
 
-    if name not in ["Suhu (°C)", "Kelembapan (%)"]:
-        return go.Figure(data=[trace_actual, trace_pred], layout=layout)
-    else:
-        return go.Figure(data=[trace_actual], layout=layout)
+    return go.Figure(data=[trace_actual], layout=layout)
 
 # Fungsi prediksi
 def generate_forecast(dfs, key):
