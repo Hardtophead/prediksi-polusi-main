@@ -17,7 +17,7 @@ TZ = "Asia/Jakarta"
 url = "https://api.thingspeak.com/channels/2990169/feeds.json"
 params = {
     "api_key": "LDXFP3LRNTBZCFMU",
-    "results": 100  # Ambil 120 data terakhir
+    "results": 100  # Ambil 100 data terakhir
 }
 
 look_back = 20  # Jumlah data historis untuk prediksi
@@ -39,15 +39,15 @@ metrics = {
     "humidity": {"display": "Kelembapan (%)", "field": 2, "color": "purple"},
     "pm25": {"display": "PM2.5 (μg/m³)", "field": 3, "color": "blue"},
     "pm10": {"display": "PM10 (μg/m³)", "field": 4, "color": "green"},
-    "co":   {"display": "CO (ppm)", "field": 5, "color": "red"},
-    "co2":  {"display": "CO₂ (ppm)", "field": 6, "color": "orange"},
+    "co": {"display": "CO (ppm)", "field": 5, "color": "red"},
+    "co2": {"display": "CO₂ (ppm)", "field": 6, "color": "orange"},
 }
 
 forecast_metrics = {
     "pm25": {"display": "PM2.5 (μg/m³)", "field": 3, "color": "blue"},
     "pm10": {"display": "PM10 (μg/m³)", "field": 4, "color": "green"},
-    "co":   {"display": "CO (ppm)", "field": 5, "color": "red"},
-    "co2":  {"display": "CO₂ (ppm)", "field": 6, "color": "orange"},
+    "co": {"display": "CO (ppm)", "field": 5, "color": "red"},
+    "co2": {"display": "CO₂ (ppm)", "field": 6, "color": "orange"},
 }
 
 # Inisialisasi aplikasi Dash
@@ -110,6 +110,7 @@ app.layout = html.Div([
     dcc.Interval(id="interval-component", interval=60 * 1000, n_intervals=0)
 ], style={"fontFamily": "Poppins, sans-serif"})
 
+
 # Fungsi ambil data dari ThingSpeak
 def fetch_data():
     response = requests.get(url, params=params)
@@ -137,30 +138,35 @@ def fetch_data():
     else:
         return {}
 
+
 def db():
     return sqlite3.connect(DB_PATH, timeout=10)
 
 def init_db():
     with db() as conn:
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS forecast_data (
+        CREATE TABLE IF NOT EXISTS forecast_data
+        (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts_target TEXT NOT NULL,   -- 'YYYY-MM-DD HH:00:00' (jam bulat)
-        feature TEXT NOT NULL,   -- 'PM2.5'/'PM10'/'CO'/'CO2'
-        y_pred REAL NOT NULL,   -- prediksi untuk ts_target (disimpan 1x)
+        ts_target TEXT NOT NULL, -- 'YYYY-MM-DD HH:00:00' (jam bulat)
+        feature TEXT NOT NULL, -- 'PM2.5'/'PM10'/'CO'/'CO2'
+        y_pred REAL NOT NULL, -- prediksi untuk ts_target (disimpan 1x)
         y_true REAL,
         mape REAL,
-        compared  INTEGER DEFAULT 0
+        compared INTEGER DEFAULT 0
         );
         """)
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_forecast_data ON forecast_data(ts_target, feature);")
 
+
 def insert(ts_target_str, feature, ypred):
     with db() as conn:
         conn.execute("""
-        INSERT OR IGNORE INTO forecast_data (ts_target, feature, y_pred)
+        INSERT
+        OR IGNORE INTO forecast_data (ts_target, feature, y_pred)
         VALUES (?, ?, ?);
         """, (ts_target_str, feature, float(ypred)))
+
 
 def compare(actual_df):
     with db() as conn:
@@ -190,21 +196,28 @@ def compare(actual_df):
         with db() as conn:
             conn.executemany("""
             UPDATE forecast_data
-            SET y_true = ?, mape = ?, compared = ?
+            SET y_true   = ?,
+            mape     = ?,
+            compared = ?
             WHERE id = ?;
             """, updates)
-        
+
+
 def get_metric_data(feature):
     with db() as conn:
         row = conn.execute("""
         SELECT mape
         FROM forecast_data
-        WHERE feature = ? AND compared = 1 AND mape IS NOT NULL
+        WHERE feature = ?
+        AND compared = 1
+        AND mape IS NOT NULL
         ORDER BY ts_target DESC
         """, (feature,)).fetchone()
     return None if not row or row[0] is None else float(row[0])
 
+
 init_db()
+
 
 # Fungsi buat grafik aktual
 def generate_figure(series, name, color):
@@ -219,6 +232,7 @@ def generate_figure(series, name, color):
                        legend=dict(orientation="h"))
 
     return go.Figure(data=[trace_actual], layout=layout)
+
 
 # Fungsi prediksi
 def generate_forecast(dfs, key):
@@ -284,7 +298,7 @@ def generate_forecast(dfs, key):
                 hovermode="closest"
             ))
         else:
-        # Fallback jika model tidak ada
+            # Fallback jika model tidak ada
             # Gunakan metode sederhana untuk prediksi
             s = df_resampled[key]
             # Hitung perbedaan antar nilai
@@ -324,6 +338,7 @@ def generate_forecast(dfs, key):
     except Exception as e:
         return go.Figure(layout={"title": f"Error prediksi: {str(e)}"})
 
+
 # CALLBACK untuk grafik aktual
 def create_actual_callback(metric_key):
     @app.callback(
@@ -337,6 +352,7 @@ def create_actual_callback(metric_key):
             return generate_figure(dfs[metric_key], metrics[metric_key]["display"], metrics[metric_key]["color"])
         else:
             return go.Figure(layout={"title": f"Gagal ambil data: {metrics[metric_key]['display']}"})
+
 
 # CALLBACK untuk grafik prediksi
 def create_forecast_callback(metric_key):
@@ -355,6 +371,7 @@ def create_forecast_callback(metric_key):
             return generate_forecast(dfs, metric_key)
         else:
             return go.Figure(layout={"title": f"Gagal ambil data: {metrics[metric_key]['display']}"})
+
 
 # CALLBACK untuk metrik aktual
 for key in metrics.keys():
@@ -377,10 +394,12 @@ for key in metrics.keys():
                 html.H2("N/A", style={"color": "gray"})
             ])
 
+
 def modified_mape(y_true, y_pred, epsilon=1e-2):
     y_true = np.where(np.abs(y_true) < epsilon, epsilon, y_true)
     mape = np.mean(np.abs((y_pred - y_true) / y_true)) * 100
     return max(0, 100 - mape)
+
 
 # CALLBACK untuk metrik prediksi
 def forecasting(key, metric_type):
@@ -464,6 +483,7 @@ def forecasting(key, metric_type):
             html.H4(f"Prediksi {metrics[key]['display']}"),
             html.H2("N/A", style={"color": "gray"})
         ])
+
 
 # Register callbacks
 for k in forecast_metrics.keys():
