@@ -4,17 +4,20 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-
+import os, sqlite3
 from dash import Dash, dcc, html
 from dash.dependencies import Input, Output
 import plotly.graph_objs as go
 from tensorflow.keras.models import load_model
 
+DB_PATH = "forecast.sqlite"
+TZ = "Asia/Jakarta"
+
 # URL ThingSpeak API
 url = "https://api.thingspeak.com/channels/2990169/feeds.json"
 params = {
     "api_key": "LDXFP3LRNTBZCFMU",
-    "results": 100  # Ambil 100 data terakhir
+    "results": 100  # Ambil 120 data terakhir
 }
 
 look_back = 20  # Jumlah data historis untuk prediksi
@@ -23,7 +26,7 @@ n_features = len(features)
 
 # Load model LSTM jika tersedia
 try:
-    lstm_model = load_model("lstm_model.h5", compile=False)
+    lstm_model = load_model("model-1.h5", compile=False)
     scaler = joblib.load("scaler.save")
     scaler_X = joblib.load("scaler_X.save")
     scaler_y = joblib.load("scaler_y.save")
@@ -91,6 +94,18 @@ app.layout = html.Div([
         *[dcc.Graph(id=f"graph-{key}-forecast", style={"height": "400px"}) for key in forecast_metrics.keys()]
     ], style={"display": "grid", "gridTemplateColumns": "1fr 1fr", "gap": "20px"}),
 
+    # Menampilkan judul untuk metrik evaluasi
+    html.H2("Metrik Evaluasi", style={"textAlign": "center", "marginTop": "30px"}),
+
+    # Membuat kotak untuk membandingkan metrik prediksi dengan nilai aktual
+    html.Div(id="forecast-metrics-compare", children=[
+        html.Div(id=f"forecast-metric-{key}-compare", style={
+            "border": "1px solid #ccc", "padding": "20px", "textAlign": "center",
+            "borderRadius": "10px", "boxShadow": "0 2px 5px rgba(0,0,0,0.1)",
+            "backgroundColor": "#fffaf0"
+        }) for key in forecast_metrics.keys()
+    ], style={"display": "grid", "gridTemplateColumns": "1fr 1fr 1fr 1fr", "gap": "20px", "margin": "20px"}),
+
     # Interval update setiap 60 detik
     dcc.Interval(id="interval-component", interval=60 * 1000, n_intervals=0)
 ], style={"fontFamily": "Poppins, sans-serif"})
@@ -122,12 +137,79 @@ def fetch_data():
     else:
         return {}
 
+def db():
+    return sqlite3.connect(DB_PATH, timeout=10)
+
+def init_db():
+    with db() as conn:
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS forecast_data (
+        zid INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_target TEXT NOT NULL,   -- 'YYYY-MM-DD HH:00:00' (jam bulat)
+        feature TEXT NOT NULL,   -- 'PM2.5'/'PM10'/'CO'/'CO2'
+        y_pred REAL NOT NULL,   -- prediksi untuk ts_target (disimpan 1x)
+        y_true REAL,
+        mape REAL,
+        compared  INTEGER DEFAULT 0
+        );
+        """)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_forecast_data ON forecast_data(ts_target, feature);")
+
+def insert(ts_target_str, feature, ypred):
+    with db() as conn:
+        conn.execute("""
+        INSERT OR IGNORE INTO forecast_data (ts_target, feature, y_pred)
+        VALUES (?, ?, ?);
+        """, (ts_target_str, feature, float(ypred)))
+
+def compare(actual_df):
+    with db() as conn:
+        rows = conn.execute("""
+        SELECT id, ts_target, feature, y_pred
+        FROM forecast_data
+        WHERE compared = 0
+        ORDER BY ts_target;
+        """).fetchall()
+    if not rows:
+        return
+
+    actual = actual_df.copy()
+    actual.index = actual.index.floor('min')
+    actual = actual[~actual.index.duplicated(keep='last')]
+
+    updates = []
+    for row_id, ts_target, feat, y_pred in rows:
+        t = pd.to_datetime(ts_target).floor('min')
+        if t not in actual.index.floor('min'):
+            continue
+        y_true = float(actual.loc[t, feat])
+        error = modified_mape(y_true, y_pred)
+        updates.append((y_true, error, 1, row_id))
+
+    if updates:
+        with db() as conn:
+            conn.executemany("""
+            UPDATE forecast_data
+            SET y_true = ?, mape = ?, compared = ?
+            WHERE id = ?;
+            """, updates)
+        
+def get_metric_data(feature):
+    with db() as conn:
+        row = conn.execute("""
+        SELECT mape
+        FROM forecast_data
+        WHERE feature = ? AND compared = 1 AND mape IS NOT NULL
+        ORDER BY ts_target DESC
+        """, (feature,)).fetchone()
+    return None if not row or row[0] is None else float(row[0])
+
+init_db()
+
 # Fungsi buat grafik aktual
 def generate_figure(series, name, color):
     if series.empty:
         return go.Figure(layout={"title": f"Gagal ambil data: {name}"})
-
-    ewma = series.ewm(span=10, adjust=False).mean()
 
     trace_actual = go.Scatter(x=series.index, y=series.values, mode="lines+markers",
                               name=f"{name} Aktual", line=dict(color=color))
@@ -166,7 +248,7 @@ def generate_forecast(dfs, key):
             seq = recent_data.copy()
             scaled = scaler_X.transform(seq)
             input_seq = scaled.reshape(1, look_back, 7)
-            pred_scaled = lstm_model.predict(input_seq)
+            pred_scaled = lstm_model.predict(input_seq, verbose=0)
             pred_scaled = pred_scaled.reshape(-1, n_features)
             pred = scaler_y.inverse_transform(pred_scaled)
             # print(pred)
@@ -295,39 +377,56 @@ for key in metrics.keys():
                 html.H2("N/A", style={"color": "gray"})
             ])
 
+def modified_mape(y_true, y_pred, epsilon=1e-2):
+    y_true = np.where(np.abs(y_true) < epsilon, epsilon, y_true)
+    mape = np.mean(np.abs((y_pred - y_true) / y_true)) * 100
+    return max(0, 100 - mape)
+
 # CALLBACK untuk metrik prediksi
-for key in forecast_metrics.keys():
+def forecasting(key, metric_type):
+    output_id = f"forecast-metric-{key}" if metric_type == "pred" else f"forecast-metric-{key}-compare"
+
     @app.callback(
-        Output(f"forecast-metric-{key}", "children"),
+        Output(output_id, "children"),
         Input("interval-component", "n_intervals"),
         prevent_initial_call="initial_duplicate"
     )
-    def update_forecast_metric(n, key=key):
+    def update_forecast_metric(n):
         dfs = fetch_data()
-        for keys in list(dfs.keys()):
-            if keys not in forecast_metrics.keys():
-                dfs.pop(keys)
+        dfs = {k: v for k, v in dfs.items() if k in forecast_metrics}
+
         if key in dfs and not dfs[key].empty:
             df = pd.DataFrame(dfs).rename(columns={
                 'pm25': 'PM2.5',
                 'pm10': 'PM10',
                 'co': 'CO',
-                'co2': 'CO2'}).dropna()
+                'co2': 'CO2'
+            }).dropna()
+
             df.index = df.index.floor('min')
             df_resampled = df[df.index.minute % 3 == 0].copy()
-
             df_resampled['hour'] = df_resampled.index.hour
             df_resampled['minute'] = df_resampled.index.minute
             df_resampled['dayofweek'] = df_resampled.index.dayofweek
-            if len(df) >= look_back:
+
+            if len(df_resampled) >= look_back and lstm_model:
                 recent = df_resampled.tail(look_back).values
-                if lstm_model:
-                    seq = recent.copy()
-                    scaled = scaler_X.transform(seq)
-                    input_seq = scaled.reshape((1, look_back, 7))
-                    pred_scaled = lstm_model.predict(input_seq)
-                    pred_scaled = pred_scaled.reshape(-1, n_features)
-                    pred = scaler_y.inverse_transform(pred_scaled)
+                scaled = scaler_X.transform(recent.copy())
+                input_seq = scaled.reshape((1, look_back, 7))
+                pred_scaled = lstm_model.predict(input_seq, verbose=0)
+                pred_scaled = pred_scaled.reshape(-1, n_features)
+                pred = scaler_y.inverse_transform(pred_scaled)
+
+                last_idx = df_resampled.index[-1]
+                ts_target = last_idx + pd.Timedelta(minutes=60)
+                ts_target_str = ts_target.strftime("%Y-%m-%d %H:%M:%S")
+
+                for i, feat in enumerate(features):
+                    insert(ts_target_str, feat, pred[-1, i])
+
+                compare(df_resampled)
+
+                if metric_type == 'pred':
                     key_map = {
                         'pm25': 'PM2.5',
                         'pm10': 'PM10',
@@ -341,10 +440,35 @@ for key in forecast_metrics.keys():
                         html.H4(f"Prediksi {metrics[key]['display']}"),
                         html.H2(f"{final_val:.2f}", style={"color": "orange", "fontSize": "36px"})
                     ])
+                else:  # metric_type == 'mae'
+                    key_map = {
+                        'pm25': 'PM2.5',
+                        'pm10': 'PM10',
+                        'co': 'CO',
+                        'co2': 'CO2'
+                    }
+                    feat = key_map.get(key)
+                    mape = get_metric_data(feat)
+                    if mape is None:
+                        return html.Div([
+                            html.H4(f"Akurasi {metrics[key]['display']}"),
+                            html.H2("Menunggu data real pada menit target…",
+                                    style={"color": "gray", "fontSize": "20px"})
+                        ])
+                    return html.Div([
+                        html.H4(f"Akurasi {metrics[key]['display']}"),
+                        html.H2(f"{mape:.2f}%", style={"color": "orange", "fontSize": "36px"})
+                    ])
+
         return html.Div([
             html.H4(f"Prediksi {metrics[key]['display']}"),
             html.H2("N/A", style={"color": "gray"})
         ])
+
+# Register callbacks
+for k in forecast_metrics.keys():
+    forecasting(k, 'pred')
+    forecasting(k, 'mae')
 
 # Registrasi semua callback grafik
 for key in metrics.keys():
