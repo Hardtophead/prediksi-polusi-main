@@ -144,7 +144,7 @@ def init_db():
     with db() as conn:
         conn.execute("""
         CREATE TABLE IF NOT EXISTS forecast_data (
-        zid INTEGER PRIMARY KEY AUTOINCREMENT,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts_target TEXT NOT NULL,   -- 'YYYY-MM-DD HH:00:00' (jam bulat)
         feature TEXT NOT NULL,   -- 'PM2.5'/'PM10'/'CO'/'CO2'
         y_pred REAL NOT NULL,   -- prediksi untuk ts_target (disimpan 1x)
