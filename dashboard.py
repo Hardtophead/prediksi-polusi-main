@@ -26,7 +26,7 @@ n_features = len(features)
 
 # Load model LSTM jika tersedia
 try:
-    lstm_model = load_model("model-1.h5", compile=False)
+    lstm_model = load_model("lstm_model.h5", compile=False)
     scaler = joblib.load("scaler.save")
     scaler_X = joblib.load("scaler_X.save")
     scaler_y = joblib.load("scaler_y.save")
